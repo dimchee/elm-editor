@@ -1,6 +1,5 @@
 module Main exposing (..)
 
-import Array exposing (Array)
 import Browser
 import Browser.Dom
 import Html exposing (Html)
@@ -10,9 +9,11 @@ import Json.Decode as JD
 import Task
 
 
+-- TODO optimization, make lines [ Str String | Blank Int ]
+-- TODO maybe even just one big buffer, and save line sizes
 type alias Model =
-    { lines : Array String
-    , cursor : Position
+    { lines : Text Char
+    , cursor : Cursor
     }
 
 
@@ -22,13 +23,13 @@ type alias Position =
     }
 
 
-type alias Direction =
-    Position
+type Direction
+    = Horizontal Int
+    | Vertical Int
 
 
-direction : ( Int, Int ) -> Position
-direction ( x, y ) =
-    { line = y, column = x }
+type alias Cursor =
+    Int
 
 
 type Msg
@@ -39,8 +40,8 @@ type Msg
 
 init : Model
 init =
-    { lines = Array.fromList [ "line1", "line2", "line3 aaa" ]
-    , cursor = { line = 0, column = 5 }
+    { lines = toText [ "line1", "line2", "line3 aaa" ]
+    , cursor = 1
     }
 
 
@@ -59,74 +60,107 @@ main =
                 { title = "elm-editor"
                 , body =
                     [ viewEditor model
-
-                    -- , Editor.viewDebug model
+                    , viewDebug model
                     ]
                 }
         , subscriptions = \_ -> Sub.none
         }
 
 
-type alias TextChar =
-    Html Msg
+viewDebug : Model -> Html Msg
+viewDebug { lines, cursor } =
+    Html.text <| Debug.toString <| cursorToPos lines cursor
 
 
-type alias TextLine =
-    List TextChar
+type alias TextChar char =
+    Maybe char
 
 
-type alias Text =
-    List TextLine
+type alias TextLine char =
+    { start : Int
+    , line : List (TextChar char)
+    }
 
 
-toText : Array String -> Text
+type alias Text char =
+    { text : List (TextLine char)
+    , len : Int
+    }
+
+
+type alias TextHtml =
+    Text (Html Msg)
+
+
+toText : List String -> Text Char
 toText =
-    Array.toList >> List.map (String.toList >> List.map (String.fromChar >> Html.text))
+    List.foldl
+        (\line { text, len } ->
+            let
+                newline =
+                    (line |> String.toList |> List.map Just)
+                        ++ [ Nothing ]
+            in
+            { text =
+                { start = len
+                , line = newline
+                }
+                    :: text
+            , len = len + List.length newline
+            }
+        )
+        { text = [], len = 0 }
+        >> mapLines List.reverse
 
 
-viewText : Text -> List (Html Msg)
+viewText : TextHtml -> List (Html Msg)
 viewText =
-    List.map (Html.div [])
+    .text >> List.map (.line >> List.filterMap identity >> Html.div [])
 
 
-onEqTransform : a -> a -> obj -> (obj -> obj) -> obj
-onEqTransform x y obj f =
-    if x == y then
-        f obj
-
-    else
-        obj
+mapLines : (List (TextLine a) -> List (TextLine b)) -> Text a -> Text b
+mapLines f { text, len } =
+    { text = f text, len = len }
 
 
-viewCursor : Position -> Int -> Int -> TextChar -> TextChar
-viewCursor cursor row col ch =
-    onEqTransform cursor { line = row, column = col } ch <|
-        (List.singleton
-            >> Html.span
-                [ HA.style "background-color" "orange"
-                ]
-        )
+indexedMap : (Int -> TextChar a -> TextChar b) -> Text a -> Text b
+indexedMap f =
+    mapLines <|
+        List.map
+            (\{ start, line } ->
+                { start = start
+                , line =
+                    line
+                        |> List.indexedMap (\i -> f (start + i))
+                }
+            )
 
 
-textAppend : Html Msg -> TextLine -> TextLine
-textAppend el l =
-    l ++ [ el ]
-
-
-addCursor : Position -> Text -> Text
+addCursor : Cursor -> TextHtml -> TextHtml
 addCursor cursor =
-    List.indexedMap
-        (\ind line ->
-            textAppend (Html.text "\u{00A0}")
-                |> onEqTransform cursor { line = ind, column = List.length line } line
+    indexedMap
+        (\ind ->
+            if ind == cursor then
+                Maybe.withDefault (Html.text "\u{00A0}")
+                    >> List.singleton
+                    >> Html.span
+                        [ HA.style "background-color" "orange"
+                        ]
+                    >> Just
+
+            else
+                identity
         )
-        >> List.indexedMap (\row -> List.indexedMap (viewCursor cursor row))
 
 
-viewNumbers : Array String -> List (Html Msg)
+viewNumbers : List a -> List (Html Msg)
 viewNumbers =
-    Array.toIndexedList
-        >> List.map (\( num, _ ) -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
+    List.indexedMap (\num _ -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
+
+
+listPrepend : a -> List a -> List a
+listPrepend x xs =
+    xs ++ [ x ]
 
 
 viewEditor : Model -> Html Msg
@@ -143,7 +177,7 @@ viewEditor { lines, cursor } =
         , HA.tabindex 0 -- to be able to focus with click
         , HA.id "editor" -- for focusing
         ]
-        [ viewNumbers lines
+        [ viewNumbers lines.text
             |> Html.div
                 [ HA.style "display" "flex"
                 , HA.style "flex-direction" "column"
@@ -152,7 +186,7 @@ viewEditor { lines, cursor } =
                 , HA.style "color" "#888"
                 ]
         , lines
-            |> toText
+            |> indexedMap (\_ -> Maybe.map (String.fromChar >> Html.text))
             |> addCursor cursor
             |> viewText
             |> Html.div
@@ -169,16 +203,16 @@ keyToMsg string =
             JD.succeed <| Insert '\t'
 
         "ArrowUp" ->
-            JD.succeed <| Move <| direction ( 0, -1 )
+            JD.succeed <| Move <| Vertical -1
 
         "ArrowDown" ->
-            JD.succeed <| Move <| direction ( 0, 1 )
-
-        "ArrowLeft" ->
-            JD.succeed <| Move <| direction ( -1, 0 )
+            JD.succeed <| Move <| Vertical  1
 
         "ArrowRight" ->
-            JD.succeed <| Move <| direction ( 1, 0 )
+            JD.succeed <| Move <| Horizontal 1
+
+        "ArrowLeft" ->
+            JD.succeed <| Move <| Horizontal -1
 
         _ ->
             case string |> String.toList of
@@ -189,35 +223,63 @@ keyToMsg string =
                     JD.fail "Key not bound"
 
 
-clampCursor : ( Int, Int ) -> Position -> Position
-clampCursor ( ln, col ) { line, column } =
-    { line = clamp 0 (ln - 1) line, column = clamp 0 col column }
+cursorToPos : Text a -> Cursor -> Maybe Position
+cursorToPos { text } cursor =
+    text
+        |> List.indexedMap (\line { start } -> ( line, start ))
+        |> List.filter (\( _, start ) -> start <= cursor)
+        |> List.reverse
+        |> List.head
+        |> Maybe.map (\( line, start ) -> { line = line, column = cursor - start })
 
 
-snapToGrid : { a | lines : Array String, cursor : Position } -> { a | lines : Array String, cursor : Position }
-snapToGrid ({ lines, cursor } as m) =
-    { m
-        | cursor =
-            clampCursor
-                ( Array.length lines
-                , Array.get cursor.line lines
-                    |> Maybe.map String.length
-                    |> Maybe.withDefault cursor.column
-                )
+posToCursor : Text a -> Position -> Maybe Cursor
+posToCursor { text } pos =
+    let
+        cursorLine =
+            clamp 0 (List.length text - 1) pos.line
+    in
+    text
+        |> List.indexedMap (\lineNum { start, line } -> ( lineNum, start, List.length line ))
+        |> Debug.log "        [ ( lineNum, start, lineLen ) ]: "
+        |> List.filter (\( line, _, _ ) -> line == cursorLine)
+        |> Debug.log "        filtered: "
+        |> List.head
+        |> Debug.log "        first: "
+        |> Maybe.map (\( _, start, lineLen ) -> start + clamp 0 (lineLen - 1) pos.column)
+
+
+moveCursor : Direction -> Text Char -> Cursor -> Cursor
+moveCursor dir text cursor =
+    clamp 0 (text.len - 1) <|
+        case dir of
+            Horizontal delta ->
+                cursor + delta
+
+            Vertical delta ->
                 cursor
-    }
-
-
-moveCursor : Direction -> Position -> Position
-moveCursor dir { line, column } =
-    { line = line + dir.line, column = column + dir.column }
+                    |> Debug.log "cursor: "
+                    |> cursorToPos text
+                    |> Debug.log "    position: "
+                    |> Maybe.map (\{ line, column } -> { line = line + delta, column = column })
+                    |> Debug.log "    changed: "
+                    |> Maybe.andThen (posToCursor text)
+                    |> Debug.log "    backToCursor: "
+                    |> Maybe.withDefault 1
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         Move dir ->
-            ( { model | cursor = moveCursor dir model.cursor } |> snapToGrid, Cmd.none )
+            ( { model | cursor = moveCursor dir model.lines model.cursor }, Cmd.none )
+        Insert char -> ( addChar char model, Cmd.none )
 
         _ ->
             ( model, Cmd.none )
+
+
+addChar : Char -> Model -> Model
+addChar char { lines, cursor } =
+    Debug.todo "TODO"
+
