@@ -9,27 +9,23 @@ import Json.Decode as JD
 import Task
 
 
--- TODO optimization, make lines [ Str String | Blank Int ]
--- TODO maybe even just one big buffer, and save line sizes
+type alias Cursor =
+    Int
+
+
+
+-- TODO buffer could be array
+
+
 type alias Model =
-    { lines : Text Char
+    { buffer : List Token
     , cursor : Cursor
-    }
-
-
-type alias Position =
-    { line : Int
-    , column : Int
     }
 
 
 type Direction
     = Horizontal Int
     | Vertical Int
-
-
-type alias Cursor =
-    Int
 
 
 type Msg
@@ -40,8 +36,8 @@ type Msg
 
 init : Model
 init =
-    { lines = toText [ "line1", "line2", "line3 aaa" ]
-    , cursor = 1
+    { buffer = toTokens [ "line1", "line2", "line3 aaa" ]
+    , cursor = 11
     }
 
 
@@ -67,104 +63,107 @@ main =
         }
 
 
-viewDebug : Model -> Html Msg
-viewDebug { lines, cursor } =
-    Html.text <| Debug.toString <| cursorToPos lines cursor
+viewDebug : { a | buffer : List Token, cursor : Cursor } -> Html msg
+viewDebug { buffer, cursor } =
+    Html.div
+        [ HA.style "display" "flex"
+        , HA.style "flex-direction" "column"
+        ]
+        [ Html.div [] [ Html.text <| Debug.toString <| cursorToPos buffer cursor ]
+        , Html.div []
+            [ Html.text <| Debug.toString <| posToCursor buffer <| cursorToPos buffer cursor
+            ]
+
+        -- , Html.div [] [ Html.text <| Debug.toString <| buffer ]
+        , Html.div [] [ Html.text <| Debug.toString <| tokensToRanges buffer ]
+
+        -- , Html.div [] [ Html.text <| Debug.toString <| indexedMap (\{range, token} -> [ (range, token) ] ) buffer ]
+        ]
 
 
-type alias TextChar char =
-    Maybe char
-
-
-type alias TextLine char =
-    { start : Int
-    , line : List (TextChar char)
-    }
-
-
-type alias Text char =
-    { text : List (TextLine char)
-    , len : Int
-    }
-
-
-type alias TextHtml =
-    Text (Html Msg)
-
-
-toText : List String -> Text Char
-toText =
-    List.foldl
-        (\line { text, len } ->
-            let
-                newline =
-                    (line |> String.toList |> List.map Just)
-                        ++ [ Nothing ]
-            in
-            { text =
-                { start = len
-                , line = newline
-                }
-                    :: text
-            , len = len + List.length newline
-            }
-        )
-        { text = [], len = 0 }
-        >> mapLines List.reverse
-
-
-viewText : TextHtml -> List (Html Msg)
-viewText =
-    .text >> List.map (.line >> List.filterMap identity >> Html.div [])
-
-
-mapLines : (List (TextLine a) -> List (TextLine b)) -> Text a -> Text b
-mapLines f { text, len } =
-    { text = f text, len = len }
-
-
-indexedMap : (Int -> TextChar a -> TextChar b) -> Text a -> Text b
-indexedMap f =
-    mapLines <|
-        List.map
-            (\{ start, line } ->
-                { start = start
-                , line =
-                    line
-                        |> List.indexedMap (\i -> f (start + i))
-                }
-            )
-
-
-addCursor : Cursor -> TextHtml -> TextHtml
+addCursor : Cursor -> List Token -> List Token
 addCursor cursor =
+    let
+        cursorTransformer =
+            List.singleton
+                >> Html.span
+                    [ HA.style "background-color" "orange"
+                    ]
+    in
     indexedMap
-        (\ind ->
-            if ind == cursor then
-                Maybe.withDefault (Html.text "\u{00A0}")
-                    >> List.singleton
-                    >> Html.span
-                        [ HA.style "background-color" "orange"
+        (\{ range, token } ->
+            let
+                pos =
+                    cursor - range.from
+            in
+            if range.from <= cursor && cursor <= range.to then
+                case token of
+                    Str ts str ->
+                        [ Str ts <| String.dropRight (range.to - cursor + 1) str
+                        , Str (cursorTransformer :: ts) <| String.slice pos (pos + 1) str
+                        , Str ts <| String.dropLeft (cursor - range.from + 1) str
                         ]
-                    >> Just
+
+                    _ ->
+                        [ Str [ cursorTransformer ] "\u{00A0}", token ]
 
             else
-                identity
+                [ token ]
         )
 
 
-viewNumbers : List a -> List (Html Msg)
-viewNumbers =
-    List.indexedMap (\num _ -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
+tokensToRanges : List Token -> List Range
+tokensToRanges tokens =
+    tokens
+        |> indexedMap
+            (\{ range, token } ->
+                Just range
+                    :: (if token /= NewLine then
+                            []
+
+                        else
+                            [ Nothing ]
+                       )
+            )
+        |> List.foldl
+            (\tokRange ranges ->
+                case ( ranges, tokRange ) of
+                    ( (Just r1) :: rs, Just r2 ) ->
+                        (Just <| rangeJoin r1 r2) :: rs
+
+                    ( Nothing :: rs, _ ) ->
+                        tokRange :: rs
+
+                    _ ->
+                        tokRange :: ranges
+            )
+            []
+        |> List.filterMap identity
+        |> List.reverse
 
 
-listPrepend : a -> List a -> List a
-listPrepend x xs =
-    xs ++ [ x ]
+tokensToHtml : List Token -> List (List (Html Msg))
+tokensToHtml =
+    List.foldr
+        (\tok lines ->
+            case ( tok, lines ) of
+                ( Str ts str, line :: rest ) ->
+                    (transform ts str :: line) :: rest
+
+                ( Str ts str, [] ) ->
+                    [ [ transform ts str ] ]
+
+                ( NewLine, _ ) ->
+                    [] :: lines
+
+                ( Blank, _ ) ->
+                    lines
+        )
+        []
 
 
 viewEditor : Model -> Html Msg
-viewEditor { lines, cursor } =
+viewEditor { buffer, cursor } =
     Html.div
         [ HA.style "display" "flex"
         , HA.style "font-family" "monospace"
@@ -177,7 +176,9 @@ viewEditor { lines, cursor } =
         , HA.tabindex 0 -- to be able to focus with click
         , HA.id "editor" -- for focusing
         ]
-        [ viewNumbers lines.text
+        [ buffer
+            |> List.filter (\x -> x == NewLine || x == Blank)
+            |> List.indexedMap (\num _ -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
             |> Html.div
                 [ HA.style "display" "flex"
                 , HA.style "flex-direction" "column"
@@ -185,10 +186,13 @@ viewEditor { lines, cursor } =
                 , HA.style "text-align" "center"
                 , HA.style "color" "#888"
                 ]
-        , lines
-            |> indexedMap (\_ -> Maybe.map (String.fromChar >> Html.text))
+        , buffer
             |> addCursor cursor
-            |> viewText
+            |> tokensToHtml
+            |> List.map (Html.div [])
+            -- |> indexedMap (\_ -> Maybe.map (String.fromChar >> Html.text))
+            -- |> addCursor cursor
+            -- |> viewText
             |> Html.div
                 [ HA.style "background-color" "#f0f0f0"
                 , HA.style "width" "100%"
@@ -206,7 +210,7 @@ keyToMsg string =
             JD.succeed <| Move <| Vertical -1
 
         "ArrowDown" ->
-            JD.succeed <| Move <| Vertical  1
+            JD.succeed <| Move <| Vertical 1
 
         "ArrowRight" ->
             JD.succeed <| Move <| Horizontal 1
@@ -223,63 +227,159 @@ keyToMsg string =
                     JD.fail "Key not bound"
 
 
-cursorToPos : Text a -> Cursor -> Maybe Position
-cursorToPos { text } cursor =
-    text
-        |> List.indexedMap (\line { start } -> ( line, start ))
-        |> List.filter (\( _, start ) -> start <= cursor)
-        |> List.reverse
-        |> List.head
-        |> Maybe.map (\( line, start ) -> { line = line, column = cursor - start })
-
-
-posToCursor : Text a -> Position -> Maybe Cursor
-posToCursor { text } pos =
-    let
-        cursorLine =
-            clamp 0 (List.length text - 1) pos.line
-    in
-    text
-        |> List.indexedMap (\lineNum { start, line } -> ( lineNum, start, List.length line ))
-        |> Debug.log "        [ ( lineNum, start, lineLen ) ]: "
-        |> List.filter (\( line, _, _ ) -> line == cursorLine)
-        |> Debug.log "        filtered: "
-        |> List.head
-        |> Debug.log "        first: "
-        |> Maybe.map (\( _, start, lineLen ) -> start + clamp 0 (lineLen - 1) pos.column)
-
-
-moveCursor : Direction -> Text Char -> Cursor -> Cursor
-moveCursor dir text cursor =
-    clamp 0 (text.len - 1) <|
+moveCursor : Direction -> List Token -> Cursor -> Cursor
+moveCursor dir tokens cursor =
+    clamp 0 ((List.map length tokens |> List.sum) - 1) <|
         case dir of
             Horizontal delta ->
                 cursor + delta
 
             Vertical delta ->
                 cursor
-                    |> Debug.log "cursor: "
-                    |> cursorToPos text
-                    |> Debug.log "    position: "
-                    |> Maybe.map (\{ line, column } -> { line = line + delta, column = column })
-                    |> Debug.log "    changed: "
-                    |> Maybe.andThen (posToCursor text)
-                    |> Debug.log "    backToCursor: "
-                    |> Maybe.withDefault 1
+                    |> cursorToPos tokens
+                    |> (\{ line, column } -> { line = line + delta, column = column })
+                    |> posToCursor tokens
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         Move dir ->
-            ( { model | cursor = moveCursor dir model.lines model.cursor }, Cmd.none )
-        Insert char -> ( addChar char model, Cmd.none )
+            ( { model | cursor = moveCursor dir model.buffer model.cursor }, Cmd.none )
 
+        -- Insert char -> ( addChar char model, Cmd.none )
         _ ->
             ( model, Cmd.none )
 
 
-addChar : Char -> Model -> Model
-addChar char { lines, cursor } =
-    Debug.todo "TODO"
+type alias Transformer =
+    Html Msg -> Html Msg
 
+
+type Token
+    = Str (List Transformer) String
+    | NewLine
+    | Blank
+
+
+transform : List Transformer -> String -> Html Msg
+transform ts str =
+    List.foldl (\t acc -> t acc) (Html.text str) ts
+
+
+length : Token -> Int
+length tok =
+    case tok of
+        Str _ str ->
+            String.length str
+
+        NewLine ->
+            1
+
+        Blank ->
+            1
+
+
+toTokens : List String -> List Token
+toTokens =
+    List.map (Str []) >> List.intersperse NewLine >> (\x -> x ++ [ Blank ])
+
+
+type alias Position =
+    { line : Int
+    , column : Int
+    }
+
+
+type alias Range =
+    { from : Int
+    , to : Int
+    }
+
+
+type alias IndexedToken =
+    { range : Range
+    , token : Token
+    }
+
+
+indexedMap : (IndexedToken -> List a) -> List Token -> List a
+indexedMap f =
+    let
+        go tok ( indToks, acc ) =
+            let
+                len =
+                    length tok
+            in
+            ( { range = { from = acc, to = acc + len - 1 }, token = tok } :: indToks, acc + len )
+    in
+    List.foldl go ( [], 0 )
+        >> Tuple.first
+        >> List.concatMap (\indTok -> f indTok |> List.reverse)
+        >> List.reverse
+
+
+rangeJoin : Range -> Range -> Range
+rangeJoin { from } { to } =
+    { from = from, to = to }
+
+
+
+-- TODO Should make 2 way map (from pos to cursor and vice verca)
+
+
+cursorToPos : List Token -> Cursor -> Position
+cursorToPos tokens cursor =
+    let
+        clamped =
+            max cursor 0
+    in
+    tokens
+        |> List.foldl
+            (\tok ( sol, ( pos, ln, col ) ) ->
+                let
+                    (( newPos, _, _ ) as new) =
+                        if tok == NewLine then
+                            ( pos + length tok, ln + 1, 0 )
+
+                        else
+                            ( pos + length tok, ln, col + length tok )
+                in
+                if pos <= clamped && clamped <= newPos then
+                    ( Just { line = ln, column = col + clamped - pos }, new )
+
+                else
+                    ( sol, new )
+            )
+            ( Nothing, ( 0, 0, 0 ) )
+        |> (\( mpos, ( _, ln, col ) ) -> Maybe.withDefault { line = ln, column = col } mpos)
+
+
+posToCursor : List Token -> Position -> Cursor
+posToCursor tokens { line, column } =
+    let
+        clampedLine = clamp 0 (List.filter ((==) NewLine) tokens |> List.length) line
+    in
+    tokens
+        |> List.foldl
+            (\tok ( sol, ( pos, ln, col ) ) ->
+                let
+                    (( _, _, newCol ) as new) =
+                        if tok == NewLine then
+                            ( pos + length tok, ln + 1, 0 )
+
+                        else
+                            ( pos + length tok, ln, col + length tok )
+                in
+                -- token can't be on more than one line
+                if ln == clampedLine && tok == NewLine && col < column then
+                    ( Just <| pos, new )
+
+                else if ln == clampedLine && col <= column && column <= newCol then
+                    ( Just <| pos + column - col, new )
+
+                else
+                    ( sol, new )
+            )
+            ( Nothing, ( 0, 0, 0 ) )
+        |> (\( mcursor, (cursor, _, _)) -> Maybe.withDefault cursor mcursor)
