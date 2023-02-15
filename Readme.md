@@ -22,6 +22,5 @@ from scratch
 
 ## Maybe
 
-
 - buffer could be array (Token, Range), add Map that maps indices to index in array
 - could make 2 way map (from pos to cursor and vice verca)
