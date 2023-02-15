@@ -7,11 +7,20 @@ import Html.Attributes as HA
 import Html.Events
 import Json.Decode as JD
 import List.Extra
+import Maybe.Extra
 import Task
 
 
 type alias Position =
     Int
+
+
+type Range
+    = Empty Position
+    | Inclusive
+        { from : Position
+        , to : Position
+        }
 
 
 type alias Model =
@@ -28,13 +37,14 @@ type Direction
 type Msg
     = NoOp
     | Move Direction
-    | Insert Char
+    | Insert Token
+    | Delete
 
 
 init : Model
 init =
     { buffer = toTokens [ "line1", "line2", "line3 aaa", "line4" ]
-    , cursor = 11
+    , cursor = 2
     }
 
 
@@ -60,21 +70,52 @@ main =
         }
 
 
+clean : List Token -> List Token
+clean =
+    List.foldr
+        (\tok acc ->
+            case ( tok, acc ) of
+                ( Str [] str1, (Str [] str2) :: xs ) ->
+                    Str [] (str1 ++ str2) :: xs
+
+                _ ->
+                    tok :: acc
+        )
+        []
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg ({ buffer, cursor } as model) =
     case msg of
         Move dir ->
             ( { model | cursor = moveCursor dir buffer cursor }, Cmd.none )
 
-        -- Insert char ->
-        --     ( { model
-        --         | buffer =
-        --             List.take (toIndex buffer cursor) buffer
-        --                 ++ (Str [] <| String.fromChar char)
-        --                 :: List.drop (toIndex buffer cursor) buffer
-        --       }
-        --     , Cmd.none
-        --     )
+        Insert tok ->
+            ( { buffer =
+                    clean <|
+                        mapRange (Empty cursor)
+                            (\_ -> [ tok ])
+                            buffer
+              , cursor = cursor + 1
+              }
+            , Cmd.none
+            )
+
+        Delete ->
+            ( if cursor > 0 then
+                { buffer =
+                    clean <|
+                        mapRange (Inclusive { from = cursor - 1, to = cursor - 1 })
+                            (\_ -> [])
+                            buffer
+                , cursor = cursor - 1
+                }
+
+              else
+                model
+            , Cmd.none
+            )
+
         _ ->
             ( model, Cmd.none )
 
@@ -90,9 +131,9 @@ viewDebug { buffer, cursor } =
         , Html.div []
             [ Html.text <| Debug.toString <| toIndex buffer <| toVisPos buffer cursor
             ]
-
-        -- , Html.div [] [ Html.text <| Debug.toString <| buffer ]
+        , Html.div [] [ Html.text <| Debug.toString <| buffer ]
         , Html.div [] [ Html.text <| Debug.toString <| tokensToRanges buffer ]
+        , Html.div [] [ Html.text <| Debug.toString <| toLines buffer ]
         ]
 
 
@@ -123,7 +164,7 @@ viewEditor { buffer, cursor } =
         , buffer
             |> addCursor cursor
             |> tokensToHtml
-            |> List.map (Html.div [])
+            |> List.map (Html.div [ HA.style "height" "24px" ])
             |> Html.div
                 [ HA.style "background-color" "#f0f0f0"
                 , HA.style "width" "100%"
@@ -134,9 +175,6 @@ viewEditor { buffer, cursor } =
 keyToMsg : String -> JD.Decoder Msg
 keyToMsg string =
     case string of
-        "Tab" ->
-            JD.succeed <| Insert '\t'
-
         "ArrowUp" ->
             JD.succeed <| Move <| Vertical -1
 
@@ -149,50 +187,113 @@ keyToMsg string =
         "ArrowLeft" ->
             JD.succeed <| Move <| Horizontal -1
 
+        "Tab" ->
+            JD.succeed <| Insert <| Str [] "\t"
+
+        "Enter" ->
+            JD.succeed <| Insert NewLine
+
+        "Backspace" ->
+            JD.succeed <| Delete
+
         _ ->
             case string |> String.toList of
+                [ ' ' ] ->
+                    JD.succeed <| Insert <| Str [] "\u{00A0}"
+
                 [ char ] ->
-                    JD.succeed <| Insert char
+                    JD.succeed <| Insert <| Str [] <| String.fromChar char
 
                 _ ->
                     JD.fail "Key not bound"
-
-
-type alias Range =
-    { from : Position
-    , to : Position
-    }
 
 
 tokensToRanges : List Token -> List Range
 tokensToRanges =
     List.map (\tok -> ( 0, length tok - 1 ))
         >> List.Extra.scanl1 (\( _, len ) ( _, end ) -> ( end + 1, len + 1 |> (+) end ))
-        >> List.map (\( start, end ) -> { from = start, to = end })
-
-
-mapRange : Range -> (Token -> Token) -> List Token -> List Token
-mapRange target f tokens =
-    List.map2 (\x y -> ( [ x ], y )) tokens (tokensToRanges tokens)
-        |> List.Extra.updateIf (\( _, { from, to } ) -> from <= target.from && target.to <= to)
-            (\( toks, { from, to } ) ->
-                ( case toks of
-                    [ Str ts str ] ->
-                        [ Str ts <| String.slice 0 (target.from - from) str
-                        , f <| Str ts <| String.slice (target.from - from) (target.to - from + 1) str
-                        , Str ts <| String.slice (target.to - from + 1) (to - from + 1) str
-                        ]
-
-                    [ NewLine ] ->
-                        [ f <| NewLine, NewLine ]
-
-                    _ ->
-                        -- unreachable
-                        toks
-                , { from = from, to = to }
-                )
+        >> List.map
+            (\( start, end ) ->
+                when (start <= end) (Inclusive { from = start, to = end })
+                    |> Maybe.withDefault (Empty start)
             )
-        |> List.concatMap Tuple.first
+
+
+getMiddle : Range -> String -> ( Maybe String, String, Maybe String )
+getMiddle range str =
+    let
+        nonEmpty =
+            Just >> Maybe.Extra.filter (not << String.isEmpty)
+    in
+    (\( l, m, r ) -> ( nonEmpty l, m, nonEmpty r )) <|
+        case range of
+            Inclusive { from, to } ->
+                ( String.slice 0 from str, String.slice from (to + 1) str, String.dropLeft (to + 1) str )
+
+            Empty pos ->
+                ( String.slice 0 pos str, "", String.dropLeft pos str )
+
+
+when : Bool -> a -> Maybe a
+when test value =
+    if test then
+        Just value
+
+    else
+        Nothing
+
+
+localTo : Range -> Range -> Maybe Range
+localTo frame range =
+    case ( frame, range ) of
+        ( Inclusive { from, to }, Inclusive r ) ->
+            Just r
+                |> Maybe.Extra.filter (\x -> x.from <= x.to)
+                |> Maybe.Extra.filter (\x -> from <= x.to && x.from <= to)
+                |> Maybe.map (\x -> { from = x.from - from, to = x.to - from })
+                |> Maybe.map
+                    (\targ ->
+                        { from = clamp 0 (to - from) <| targ.from
+                        , to = clamp 0 (to - from) <| targ.to
+                        }
+                    )
+                |> Maybe.map Inclusive
+
+        ( Empty pos, Inclusive { from, to } ) ->
+            when (from <= pos && pos <= to) <| Empty 0
+
+        ( Inclusive { from, to }, Empty pos ) ->
+            when (from <= pos && pos <= to) <| Empty <| pos - from
+
+        ( Empty pos1, Empty pos2 ) ->
+            when (pos1 == pos2) <| Empty 0
+
+
+mapRange : Range -> (Token -> List Token) -> List Token -> List Token
+mapRange target f tokens =
+    List.map2 (\tok range -> ( tok, localTo range target )) tokens (tokensToRanges tokens)
+        |> List.concatMap
+            (\ranged ->
+                case ranged of
+                    ( Str ts str, Just localRange ) ->
+                        getMiddle localRange str
+                            |> (\( left, mid, right ) ->
+                                    (List.map (Str ts) <| Maybe.Extra.toList left)
+                                        ++ (f <| Str ts <| mid)
+                                        ++ (List.map (Str ts) <| Maybe.Extra.toList right)
+                               )
+
+                    ( NewLine, Just localRange ) ->
+                        case localRange of
+                            Empty _ ->
+                                (f <| NewLine) ++ [ NewLine ]
+
+                            Inclusive _ ->
+                                f <| NewLine
+
+                    ( tok, Nothing ) ->
+                        [ tok ]
+            )
 
 
 addCursor : Position -> List Token -> List Token
@@ -204,14 +305,15 @@ addCursor cursor =
                     [ HA.style "background-color" "orange"
                     ]
     in
-    mapRange { from = cursor, to = cursor }
+    -- Fix `mapRange (Empty cursor)` type of error
+    mapRange (Inclusive { from = cursor, to = cursor })
         (\token ->
-            case token |> Debug.log "Tok: " of
+            case token of
                 Str ts str ->
-                    Str (cursorTransformer :: ts) <| str
+                    [ Str (cursorTransformer :: ts) <| str ]
 
-                _ ->
-                    Str [ cursorTransformer ] "\u{00A0}"
+                NewLine ->
+                    [ Str [ cursorTransformer ] "\u{00A0}", NewLine ]
         )
 
 
@@ -258,8 +360,15 @@ toVisPos toks pos =
 tokensToHtml : List Token -> List (List (Html Msg))
 tokensToHtml =
     toLines
-        >> List.map (\( tok, toks ) -> tok :: toks)
-        >> List.map (List.filterMap toMaybe >> List.map transform)
+        >> List.map
+            (\nonEmpty ->
+                case nonEmpty of
+                    ( NewLine, _ ) ->
+                        [ Html.text "" ]
+
+                    ( Str ts x, xs ) ->
+                        transform ( ts, x ) :: (xs |> List.filterMap toMaybe |> List.map transform)
+            )
 
 
 moveCursor : Direction -> List Token -> Position -> Position
@@ -301,4 +410,7 @@ length tok =
 
 toTokens : List String -> List Token
 toTokens =
-    List.concatMap (\line -> [ Str [] line, NewLine ])
+    List.filter (not << String.isEmpty)
+        >> List.map (Str [])
+        >> List.intersperse NewLine
+        >> (\x -> x ++ [ NewLine ])
