@@ -9,16 +9,16 @@ from scratch
 
 - [x] Insert
 - [x] Delete
-- [] Ctrl + backspace for deleting last word
-- [] tests (+ fuzzy)
-- [] Change Range to { from: Position, to: Position }
-- [] Copy paste
-- [] hover
-- [] selection
-- [] vim mode
-- [] ? context menu
-- [] dark mode (switch)
-- [] font size select
+- [ ] Ctrl + backspace for deleting last word
+- [ ] tests (+ fuzzy)
+- [ ] Change Range to { from: Position, to: Position }
+- [ ] Copy paste
+- [ ] hover
+- [ ] selection
+- [ ] vim mode
+- [ ] ? context menu
+- [ ] dark mode (switch)
+- [ ] font size select
 
 ## Maybe
 
