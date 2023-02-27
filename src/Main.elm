@@ -24,7 +24,7 @@ type Range
 
 
 type alias Model =
-    { buffer : List Token
+    { buffer : Buffer
     , cursor : Position
     }
 
@@ -37,13 +37,22 @@ type Direction
 type Msg
     = NoOp
     | Move Direction
-    | Insert Token
+    | Insert String
     | Delete
+
+
+type alias Buffer =
+    String
+
+
+toBuffer : List String -> Buffer
+toBuffer =
+    String.join "\n"
 
 
 init : Model
 init =
-    { buffer = toTokens [ "line1", "line2", "line3 aaa", "line4" ]
+    { buffer = toBuffer [ "line1", "line2", "line3 aaa", "line4" ]
     , cursor = 2
     }
 
@@ -70,32 +79,17 @@ main =
         }
 
 
-clean : List Token -> List Token
-clean =
-    List.foldr
-        (\tok acc ->
-            case ( tok, acc ) of
-                ( Str [] str1, (Str [] str2) :: xs ) ->
-                    Str [] (str1 ++ str2) :: xs
-
-                _ ->
-                    tok :: acc
-        )
-        []
-
-
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg ({ buffer, cursor } as model) =
     case msg of
         Move dir ->
             ( { model | cursor = moveCursor dir buffer cursor }, Cmd.none )
 
-        Insert tok ->
+        Insert str ->
             ( { buffer =
-                    clean <|
-                        mapRange (Empty cursor)
-                            (\_ -> [ tok ])
-                            buffer
+                    String.slice 0 cursor buffer
+                        ++ str
+                        ++ String.slice cursor (String.length buffer) buffer
               , cursor = cursor + 1
               }
             , Cmd.none
@@ -104,10 +98,8 @@ update msg ({ buffer, cursor } as model) =
         Delete ->
             ( if cursor > 0 then
                 { buffer =
-                    clean <|
-                        mapRange (Inclusive { from = cursor - 1, to = cursor - 1 })
-                            (\_ -> [])
-                            buffer
+                    String.slice 0 (cursor - 1) buffer
+                        ++ String.slice cursor (String.length buffer) buffer
                 , cursor = cursor - 1
                 }
 
@@ -132,8 +124,10 @@ viewDebug { buffer, cursor } =
             [ Html.text <| Debug.toString <| toIndex buffer <| toVisPos buffer cursor
             ]
         , Html.div [] [ Html.text <| Debug.toString <| buffer ]
-        , Html.div [] [ Html.text <| Debug.toString <| tokensToRanges buffer ]
-        , Html.div [] [ Html.text <| Debug.toString <| toLines buffer ]
+
+        -- , Html.div [] [ Html.text <| Debug.toString <| tokensToRanges buffer ]
+        -- , Html.div [] [ Html.text <| Debug.toString <| toLines buffer ]
+        , Html.div [] [ Html.text <| Debug.toString <| toTokens buffer ]
         ]
 
 
@@ -152,7 +146,8 @@ viewEditor { buffer, cursor } =
         , HA.id "editor" -- for focusing
         ]
         [ buffer
-            |> List.filter (\x -> x == NewLine)
+            |> String.filter (\x -> x == '\n')
+            |> String.toList
             |> List.indexedMap (\num _ -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
             |> Html.div
                 [ HA.style "display" "flex"
@@ -162,6 +157,7 @@ viewEditor { buffer, cursor } =
                 , HA.style "color" "#888"
                 ]
         , buffer
+            |> toTokens
             |> addCursor cursor
             |> tokensToHtml
             |> List.map (Html.div [ HA.style "height" "24px" ])
@@ -188,10 +184,10 @@ keyToMsg string =
             JD.succeed <| Move <| Horizontal -1
 
         "Tab" ->
-            JD.succeed <| Insert <| Str [] "\t"
+            JD.succeed <| Insert "\t"
 
         "Enter" ->
-            JD.succeed <| Insert NewLine
+            JD.succeed <| Insert "\n"
 
         "Backspace" ->
             JD.succeed <| Delete
@@ -199,10 +195,10 @@ keyToMsg string =
         _ ->
             case string |> String.toList of
                 [ ' ' ] ->
-                    JD.succeed <| Insert <| Str [] "\u{00A0}"
+                    JD.succeed <| Insert <| "\u{00A0}"
 
                 [ char ] ->
-                    JD.succeed <| Insert <| Str [] <| String.fromChar char
+                    JD.succeed <| Insert <| String.fromChar char
 
                 _ ->
                     JD.fail "Key not bound"
@@ -332,15 +328,17 @@ toLines =
     List.Extra.groupWhile (\tok _ -> tok /= NewLine)
 
 
-lineLengths : List Token -> List Int
+lineLengths : Buffer -> List Int
 lineLengths =
-    List.Extra.groupWhile (\tok _ -> tok /= NewLine)
-        >> List.map ((\( a, b ) -> a :: b) >> List.map length >> List.sum)
+    (\x -> String.append x "\n")
+        >> String.toList
+        >> List.Extra.groupWhile (\tok _ -> tok /= '\n')
+        >> List.map ((\( a, b ) -> a :: b) >> List.length)
 
 
-toIndex : List Token -> { line : Int, column : Int } -> Int
-toIndex toks { line, column } =
-    toks
+toIndex : Buffer -> { line : Int, column : Int } -> Int
+toIndex buff { line, column } =
+    buff
         |> lineLengths
         |> List.take (line + 1)
         |> List.Extra.unconsLast
@@ -348,9 +346,9 @@ toIndex toks { line, column } =
         |> Maybe.withDefault column
 
 
-toVisPos : List Token -> Int -> { line : Int, column : Int }
-toVisPos toks pos =
-    toks
+toVisPos : Buffer -> Int -> { line : Int, column : Int }
+toVisPos buff pos =
+    buff
         |> lineLengths
         |> List.Extra.scanl1 (+)
         |> List.Extra.takeWhile ((>=) pos)
@@ -371,17 +369,17 @@ tokensToHtml =
             )
 
 
-moveCursor : Direction -> List Token -> Position -> Position
-moveCursor dir tokens cursor =
+moveCursor : Direction -> Buffer -> Position -> Position
+moveCursor dir buff cursor =
     case dir of
         Horizontal delta ->
-            cursor + delta |> clamp 0 ((lineLengths tokens |> List.sum) - 1)
+            cursor + delta |> clamp 0 ((lineLengths buff |> List.sum) - 1)
 
         Vertical delta ->
             cursor
-                |> toVisPos tokens
+                |> toVisPos buff
                 |> (\{ line, column } -> { line = line + delta, column = column })
-                |> toIndex tokens
+                |> toIndex buff
 
 
 type alias Transformer =
@@ -408,9 +406,9 @@ length tok =
             1
 
 
-toTokens : List String -> List Token
+toTokens : Buffer -> List Token
 toTokens =
-    List.filter (not << String.isEmpty)
+    String.split "\n"
         >> List.map (Str [])
         >> List.intersperse NewLine
         >> (\x -> x ++ [ NewLine ])
