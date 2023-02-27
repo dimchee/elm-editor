@@ -39,6 +39,7 @@ type Msg
     | Move Direction
     | Insert String
     | Delete
+    | DeleteWord
 
 
 type alias Buffer =
@@ -108,7 +109,29 @@ update msg ({ buffer, cursor } as model) =
             , Cmd.none
             )
 
-        _ ->
+        DeleteWord ->
+            let
+                wLen =
+                    String.slice 0 (cursor - 1) buffer
+                        |> String.words
+                        |> List.Extra.last
+                        |> Maybe.map String.length
+                        |> Maybe.withDefault -1
+                        |> (+) 1
+            in
+            ( if cursor > 0 then
+                { buffer =
+                    String.slice 0 (cursor - wLen) buffer
+                        ++ String.slice cursor (String.length buffer) buffer
+                , cursor = cursor - wLen
+                }
+
+              else
+                model
+            , Cmd.none
+            )
+
+        NoOp ->
             ( model, Cmd.none )
 
 
@@ -139,15 +162,16 @@ viewEditor { buffer, cursor } =
         , HA.style "font-size" "20px"
         , HA.style "tab-size" "4"
         , Html.Events.on "keydown"
-            (JD.field "key" JD.string
+            (JD.map2 Tuple.pair
+                (JD.field "key" JD.string)
+                (JD.field "ctrlKey" JD.bool)
                 |> JD.andThen keyToMsg
             )
         , HA.tabindex 0 -- to be able to focus with click
         , HA.id "editor" -- for focusing
         ]
         [ buffer
-            |> String.filter (\x -> x == '\n')
-            |> String.toList
+            |> lineLengths
             |> List.indexedMap (\num _ -> Html.div [] <| List.singleton <| Html.text <| String.fromInt num)
             |> Html.div
                 [ HA.style "display" "flex"
@@ -168,9 +192,9 @@ viewEditor { buffer, cursor } =
         ]
 
 
-keyToMsg : String -> JD.Decoder Msg
-keyToMsg string =
-    case string of
+keyToMsg : ( String, Bool ) -> JD.Decoder Msg
+keyToMsg ( key, ctrl ) =
+    case key of
         "ArrowUp" ->
             JD.succeed <| Move <| Vertical -1
 
@@ -190,10 +214,14 @@ keyToMsg string =
             JD.succeed <| Insert "\n"
 
         "Backspace" ->
-            JD.succeed <| Delete
+            if ctrl then
+                JD.succeed <| DeleteWord
+
+            else
+                JD.succeed <| Delete
 
         _ ->
-            case string |> String.toList of
+            case key |> String.toList of
                 [ ' ' ] ->
                     JD.succeed <| Insert <| "\u{00A0}"
 
@@ -409,6 +437,4 @@ length tok =
 toTokens : Buffer -> List Token
 toTokens =
     String.split "\n"
-        >> List.map (Str [])
-        >> List.intersperse NewLine
-        >> (\x -> x ++ [ NewLine ])
+        >> List.concatMap (\x -> [ Str [] x, NewLine ])

@@ -10,7 +10,7 @@ from scratch
 - [x] Insert
 - [x] Delete
 - [x] Buffer from `List Token` to `String`
-- [ ] Ctrl + backspace for deleting last word
+- [x] Ctrl + backspace for deleting last word
 - [ ] tests (+ fuzzy)
 - [ ] Copy paste
 - [ ] hover
@@ -19,8 +19,3 @@ from scratch
 - [ ] ? context menu
 - [ ] dark mode (switch)
 - [ ] font size select
-
-## Maybe
-
-- buffer could be array (Token, Range), add Map that maps indices to index in array
-- could make 2 way map (from pos to cursor and vice verca)
