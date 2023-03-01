@@ -7,15 +7,14 @@ from scratch
 
 ## ToDo
 
-- [x] Insert
-- [x] Delete
+- [x] insert
+- [x] delete
 - [x] Buffer from `List Token` to `String`
 - [x] Ctrl + backspace for deleting last word
-- [ ] tests (+ fuzzy)
-- [ ] Copy paste
-- [ ] hover
+- [ ] copy paste
+- [x] hover
 - [ ] selection
+- [ ] tests (+ fuzzy)
 - [ ] vim mode
 - [ ] ? context menu
 - [ ] dark mode (switch)
-- [ ] font size select

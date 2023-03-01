@@ -15,6 +15,16 @@ type alias Position =
     Int
 
 
+type alias Buffer =
+    String
+
+
+type Hover
+    = NoHover
+    | HoverLine Int
+    | HoverChar Position
+
+
 type Range
     = Empty Position
     | Inclusive
@@ -26,6 +36,7 @@ type Range
 type alias Model =
     { buffer : Buffer
     , cursor : Position
+    , hover : Hover
     }
 
 
@@ -40,10 +51,7 @@ type Msg
     | Insert String
     | Delete
     | DeleteWord
-
-
-type alias Buffer =
-    String
+    | Hover Hover
 
 
 toBuffer : List String -> Buffer
@@ -55,6 +63,7 @@ init : Model
 init =
     { buffer = toBuffer [ "line1", "line2", "line3 aaa", "line4" ]
     , cursor = 2
+    , hover = NoHover
     }
 
 
@@ -87,21 +96,23 @@ update msg ({ buffer, cursor } as model) =
             ( { model | cursor = moveCursor dir buffer cursor }, Cmd.none )
 
         Insert str ->
-            ( { buffer =
+            ( { model
+                | buffer =
                     String.slice 0 cursor buffer
                         ++ str
                         ++ String.slice cursor (String.length buffer) buffer
-              , cursor = cursor + 1
+                , cursor = cursor + 1
               }
             , Cmd.none
             )
 
         Delete ->
             ( if cursor > 0 then
-                { buffer =
-                    String.slice 0 (cursor - 1) buffer
-                        ++ String.slice cursor (String.length buffer) buffer
-                , cursor = cursor - 1
+                { model
+                    | buffer =
+                        String.slice 0 (cursor - 1) buffer
+                            ++ String.slice cursor (String.length buffer) buffer
+                    , cursor = cursor - 1
                 }
 
               else
@@ -120,14 +131,22 @@ update msg ({ buffer, cursor } as model) =
                         |> (+) 1
             in
             ( if cursor > 0 then
-                { buffer =
-                    String.slice 0 (cursor - wLen) buffer
-                        ++ String.slice cursor (String.length buffer) buffer
-                , cursor = cursor - wLen
+                { model
+                    | buffer =
+                        String.slice 0 (cursor - wLen) buffer
+                            ++ String.slice cursor (String.length buffer) buffer
+                    , cursor = cursor - wLen
                 }
 
               else
                 model
+            , Cmd.none
+            )
+
+        Hover hover ->
+            ( { model
+                | hover = hover
+              }
             , Cmd.none
             )
 
@@ -136,7 +155,7 @@ update msg ({ buffer, cursor } as model) =
 
 
 viewDebug : Model -> Html msg
-viewDebug { buffer, cursor } =
+viewDebug { buffer, cursor, hover } =
     Html.div
         [ HA.style "display" "flex"
         , HA.style "flex-direction" "column"
@@ -147,10 +166,8 @@ viewDebug { buffer, cursor } =
             [ Html.text <| Debug.toString <| toIndex buffer <| toVisPos buffer cursor
             ]
         , Html.div [] [ Html.text <| Debug.toString <| buffer ]
-
-        -- , Html.div [] [ Html.text <| Debug.toString <| tokensToRanges buffer ]
-        -- , Html.div [] [ Html.text <| Debug.toString <| toLines buffer ]
         , Html.div [] [ Html.text <| Debug.toString <| toTokens buffer ]
+        , Html.div [] [ Html.text <| Debug.toString <| hover ]
         ]
 
 
@@ -167,6 +184,7 @@ viewEditor { buffer, cursor } =
                 (JD.field "ctrlKey" JD.bool)
                 |> JD.andThen keyToMsg
             )
+        , Html.Events.onMouseOut (Hover NoHover)
         , HA.tabindex 0 -- to be able to focus with click
         , HA.id "editor" -- for focusing
         ]
@@ -184,7 +202,13 @@ viewEditor { buffer, cursor } =
             |> toTokens
             |> addCursor cursor
             |> tokensToHtml
-            |> List.map (Html.div [ HA.style "height" "24px" ])
+            |> List.indexedMap
+                (\line ->
+                    Html.div
+                        [ HA.style "height" "24px"
+                        , Html.Events.onMouseOver (Hover (HoverLine line))
+                        ]
+                )
             |> Html.div
                 [ HA.style "background-color" "#f0f0f0"
                 , HA.style "width" "100%"
@@ -232,17 +256,6 @@ keyToMsg ( key, ctrl ) =
                     JD.fail "Key not bound"
 
 
-tokensToRanges : List Token -> List Range
-tokensToRanges =
-    List.map (\tok -> ( 0, length tok - 1 ))
-        >> List.Extra.scanl1 (\( _, len ) ( _, end ) -> ( end + 1, len + 1 |> (+) end ))
-        >> List.map
-            (\( start, end ) ->
-                when (start <= end) (Inclusive { from = start, to = end })
-                    |> Maybe.withDefault (Empty start)
-            )
-
-
 getMiddle : Range -> String -> ( Maybe String, String, Maybe String )
 getMiddle range str =
     let
@@ -258,66 +271,30 @@ getMiddle range str =
                 ( String.slice 0 pos str, "", String.dropLeft pos str )
 
 
-when : Bool -> a -> Maybe a
-when test value =
-    if test then
-        Just value
-
-    else
-        Nothing
-
-
-localTo : Range -> Range -> Maybe Range
-localTo frame range =
-    case ( frame, range ) of
-        ( Inclusive { from, to }, Inclusive r ) ->
-            Just r
-                |> Maybe.Extra.filter (\x -> x.from <= x.to)
-                |> Maybe.Extra.filter (\x -> from <= x.to && x.from <= to)
-                |> Maybe.map (\x -> { from = x.from - from, to = x.to - from })
-                |> Maybe.map
-                    (\targ ->
-                        { from = clamp 0 (to - from) <| targ.from
-                        , to = clamp 0 (to - from) <| targ.to
-                        }
-                    )
-                |> Maybe.map Inclusive
-
-        ( Empty pos, Inclusive { from, to } ) ->
-            when (from <= pos && pos <= to) <| Empty 0
-
-        ( Inclusive { from, to }, Empty pos ) ->
-            when (from <= pos && pos <= to) <| Empty <| pos - from
-
-        ( Empty pos1, Empty pos2 ) ->
-            when (pos1 == pos2) <| Empty 0
-
-
 mapRange : Range -> (Token -> List Token) -> List Token -> List Token
-mapRange target f tokens =
-    List.map2 (\tok range -> ( tok, localTo range target )) tokens (tokensToRanges tokens)
-        |> List.concatMap
-            (\ranged ->
-                case ranged of
-                    ( Str ts str, Just localRange ) ->
-                        getMiddle localRange str
-                            |> (\( left, mid, right ) ->
-                                    (List.map (Str ts) <| Maybe.Extra.toList left)
-                                        ++ (f <| Str ts <| mid)
-                                        ++ (List.map (Str ts) <| Maybe.Extra.toList right)
-                               )
+mapRange target f =
+    case target of
+        Empty pos ->
+            List.indexedMap
+                (\ind tok ->
+                    if ind == pos then
+                        f tok
 
-                    ( NewLine, Just localRange ) ->
-                        case localRange of
-                            Empty _ ->
-                                (f <| NewLine) ++ [ NewLine ]
-
-                            Inclusive _ ->
-                                f <| NewLine
-
-                    ( tok, Nothing ) ->
+                    else
                         [ tok ]
-            )
+                )
+                >> List.concat
+
+        Inclusive { from, to } ->
+            List.indexedMap
+                (\ind tok ->
+                    if from <= ind && ind <= to then
+                        f tok
+
+                    else
+                        [ tok ]
+                )
+                >> List.concat
 
 
 addCursor : Position -> List Token -> List Token
@@ -333,27 +310,12 @@ addCursor cursor =
     mapRange (Inclusive { from = cursor, to = cursor })
         (\token ->
             case token of
-                Str ts str ->
-                    [ Str (cursorTransformer :: ts) <| str ]
+                CharTok ts ch ->
+                    [ CharTok (cursorTransformer :: ts) <| ch ]
 
                 NewLine ->
-                    [ Str [ cursorTransformer ] "\u{00A0}", NewLine ]
+                    [ CharTok [ cursorTransformer ] '\u{00A0}', NewLine ]
         )
-
-
-toMaybe : Token -> Maybe ( List Transformer, String )
-toMaybe tok =
-    case tok of
-        Str ts str ->
-            Just <| ( ts, str )
-
-        _ ->
-            Nothing
-
-
-toLines : List Token -> List ( Token, List Token )
-toLines =
-    List.Extra.groupWhile (\tok _ -> tok /= NewLine)
 
 
 lineLengths : Buffer -> List Int
@@ -385,16 +347,24 @@ toVisPos buff pos =
 
 tokensToHtml : List Token -> List (List (Html Msg))
 tokensToHtml =
-    toLines
-        >> List.map
-            (\nonEmpty ->
-                case nonEmpty of
-                    ( NewLine, _ ) ->
-                        [ Html.text "" ]
+    List.Extra.unconsLast -- remove NewLine on end
+        >> Maybe.map Tuple.second
+        >> Maybe.withDefault []
+        >> List.Extra.indexedFoldl
+            (\pos tok acc ->
+                case ( tok, acc ) of
+                    ( CharTok ts ch, x :: xs ) ->
+                        (( pos, ts, ch ) :: x) :: xs
 
-                    ( Str ts x, xs ) ->
-                        transform ( ts, x ) :: (xs |> List.filterMap toMaybe |> List.map transform)
+                    ( CharTok ts ch, [] ) ->
+                        [ ( pos, ts, ch ) ] |> List.singleton
+
+                    _ ->
+                        [] :: acc
             )
+            []
+        >> List.map (List.map transform >> List.reverse)
+        >> List.reverse
 
 
 moveCursor : Direction -> Buffer -> Position -> Position
@@ -415,26 +385,37 @@ type alias Transformer =
 
 
 type Token
-    = Str (List Transformer) String
+    = CharTok (List Transformer) Char
     | NewLine
 
 
-transform : ( List Transformer, String ) -> Html Msg
-transform ( ts, str ) =
-    List.foldl (\t acc -> t acc) (Html.text str) ts
-
-
-length : Token -> Int
-length tok =
-    case tok of
-        Str _ str ->
-            String.length str
-
-        _ ->
-            1
+transform : ( Position, List Transformer, Char ) -> Html Msg
+transform ( pos, ts, ch ) =
+    List.foldl (\t acc -> t acc)
+        (Html.span
+            [ Html.Events.custom "mouseover"
+                (JD.succeed
+                    { message = Hover (HoverChar pos)
+                    , stopPropagation = True
+                    , preventDefault = True
+                    }
+                )
+            ]
+         <|
+            [ Html.text <| String.fromChar ch ]
+        )
+        ts
 
 
 toTokens : Buffer -> List Token
-toTokens =
-    String.split "\n"
-        >> List.concatMap (\x -> [ Str [] x, NewLine ])
+toTokens buf =
+    String.append buf "\n"
+        |> String.toList
+        |> List.map
+            (\ch ->
+                if ch == '\n' then
+                    NewLine
+
+                else
+                    CharTok [] ch
+            )
